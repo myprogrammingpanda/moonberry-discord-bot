@@ -168,6 +168,44 @@ async function handleSetChannelCommand(interaction, env) {
 }
 
 // ---------------------------------------------------------------------
+// Shared notify logic (called by both the current /notify and the
+// legacy /notify/<game> routes)
+// ---------------------------------------------------------------------
+
+async function handleNotify(gameKey, body, env) {
+  const game = GAMES[gameKey];
+  if (!game) {
+    return json({ error: "unknown_game" }, 404);
+  }
+
+  const hostName = body.host_name || "Someone";
+  const joinCode = body.join_code || null;
+  const event = body.event || "started"; // "started" or "ended"
+
+  let message;
+  if (event === "ended") {
+    message = `${game.emoji} **${hostName}** stopped hosting ${game.displayName}. World save synced to the cloud.`;
+  } else {
+    const codeLine = joinCode
+      ? `Join Code: **${joinCode}**`
+      : `Join via Steam invite (no join code found this session)`;
+
+    message =
+      `${game.emoji} **${hostName}** just started hosting ${game.displayName}!\n` +
+      `Password: \`${game.recommendedPassword}\`\n` +
+      codeLine;
+  }
+
+  try {
+    const targetChannelId = await getChannelForGame(env, gameKey, game.channelId);
+    await postDiscordMessage(env, targetChannelId, message);
+    return json({ ok: true });
+  } catch (e) {
+    return json({ ok: false, error: e.message }, 500);
+  }
+}
+
+// ---------------------------------------------------------------------
 // Main request router
 // ---------------------------------------------------------------------
 
@@ -204,13 +242,27 @@ export default {
       return json({ type: 4, data: { content: "Unknown command." } });
     }
 
-    // --- POST /notify/<game> -- called by a game's companion app ---
+    // --- POST /notify -- generic endpoint, game_id in the body. Used by
+    //     the current companion apps (one endpoint, any number of games). ---
+    if (request.method === "POST" && url.pathname === "/notify") {
+      const auth = request.headers.get("X-Auth");
+      if (!auth || auth !== env.NOTIFY_SECRET) {
+        return json({ error: "unauthorized" }, 401);
+      }
+
+      const body = await request.json().catch(() => ({}));
+      if (!body.game_id) {
+        return json({ error: "missing_game_id" }, 400);
+      }
+
+      return handleNotify(body.game_id, body, env);
+    }
+
+    // --- POST /notify/<game> -- legacy path-based endpoint, kept for
+    //     older companion apps that predate the game_id-in-body contract.
+    //     Remove once every game's app has upgraded to POST /notify. ---
     if (request.method === "POST" && url.pathname.startsWith("/notify/")) {
       const gameKey = url.pathname.split("/notify/")[1];
-      const game = GAMES[gameKey];
-      if (!game) {
-        return json({ error: "unknown_game" }, 404);
-      }
 
       const auth = request.headers.get("X-Auth");
       if (!auth || auth !== env.NOTIFY_SECRET) {
@@ -218,31 +270,7 @@ export default {
       }
 
       const body = await request.json().catch(() => ({}));
-      const hostName = body.host_name || "Someone";
-      const joinCode = body.join_code || null;
-      const event = body.event || "started"; // "started" or "ended"
-
-      let message;
-      if (event === "ended") {
-        message = `${game.emoji} **${hostName}** stopped hosting ${game.displayName}. World save synced to the cloud.`;
-      } else {
-        const codeLine = joinCode
-          ? `Join Code: **${joinCode}**`
-          : `Join via Steam invite (no join code found this session)`;
-
-        message =
-          `${game.emoji} **${hostName}** just started hosting ${game.displayName}!\n` +
-          `Password: \`${game.recommendedPassword}\`\n` +
-          codeLine;
-      }
-
-      try {
-        const targetChannelId = await getChannelForGame(env, gameKey, game.channelId);
-        await postDiscordMessage(env, targetChannelId, message);
-        return json({ ok: true });
-      } catch (e) {
-        return json({ ok: false, error: e.message }, 500);
-      }
+      return handleNotify(gameKey, body, env);
     }
 
     return json({ error: "not_found" }, 404);
