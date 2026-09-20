@@ -1,0 +1,14 @@
+# Real secrets and personal config -- NEVER commit this.
+# Only games.config.example.js should ever be tracked in git.
+games.config.js
+
+# Cloudflare Workers local state -- can contain cached auth tokens
+.wrangler/
+
+# Node dependencies -- reinstalled via `npm install`, never committed
+node_modules/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
