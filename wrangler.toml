@@ -9,7 +9,7 @@ kv_namespaces = [
   { binding = "MOONBERRY_KV", id = "7cde9a638bb04a39b54fdb99cce2003c" }
 ]
 
-# Service Binding: lets this Worker call the Valheim coordinator Worker
+# Service Binding: lets this Worker call the shared coordinator Worker
 # DIRECTLY (bypassing the public internet entirely), which is required --
 # Cloudflare blocks a Worker from fetch()-ing another Worker's public
 # *.workers.dev URL as a loop-prevention measure (error 1042).
@@ -19,8 +19,8 @@ kv_namespaces = [
 # header appears, so a plain key placed below it gets silently absorbed
 # into the wrong section instead of being read as a top-level setting.
 [[services]]
-binding = "VALHEIM_COORDINATOR"
-service = "valheim-sync-coordinator"
+binding = "COORDINATOR"
+service = "moonberry-coordinator"
 
 # Secrets (set these, don't hardcode them here):
 #   wrangler secret put DISCORD_BOT_TOKEN

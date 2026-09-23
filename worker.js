@@ -5,18 +5,22 @@
  * more than one game later without restructuring anything.
  *
  * How it works:
- *   1. Each game's companion app (e.g. the Valheim save-sync app) calls
- *      POST /notify/<game> whenever something worth announcing happens
- *      (right now: "someone started hosting"). This Worker then posts a
- *      message to that game's configured Discord channel.
+ *   1. The companion app (moonberry-save-sync) calls POST /notify with
+ *      the game_id in the body whenever someone starts or stops hosting.
+ *      This Worker then posts a message to that game's Discord channel.
  *   2. Discord sends slash-command invocations (e.g. /status) to
  *      POST /interactions. This Worker verifies the request really came
  *      from Discord, then replies with live status pulled directly from
- *      that game's own coordinator.
+ *      the coordinator.
  *
- * ADDING A NEW GAME LATER: just add one entry to the GAMES object below
- * with its own channel ID, recommended password, and coordinator details.
- * Nothing else in this file needs to change.
+ * All games share ONE coordinator (a single global host lock), set once
+ * as COORDINATOR in games.config.js. A game entry can still override
+ * statusUrl/statusSecret/statusBinding if it ever gets its own.
+ *
+ * ADDING A NEW GAME LATER: add one entry to GAMES in games.config.js,
+ * then re-register the slash commands (npm run commands:register) so the
+ * new game shows up in the /status and /set-channel choices. Nothing in
+ * this file needs to change.
  *
  * NOTE: signature verification uses the "discord-interactions" npm
  * package rather than hand-rolled WebCrypto Ed25519 calls -- this is
@@ -27,12 +31,17 @@
  */
 
 import { verifyKey } from "discord-interactions";
-import { GAMES } from "./games.config.js";
+// Namespace import so an older games.config.js without a COORDINATOR
+// export still builds (it just comes through as undefined).
+import * as config from "./games.config.js";
 
 // ---------------------------------------------------------------------
 // Game registry lives in games.config.js (gitignored, not committed).
 // See games.config.example.js for the template.
 // ---------------------------------------------------------------------
+
+const GAMES = config.GAMES;
+const COORDINATOR = config.COORDINATOR || {};
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -52,7 +61,9 @@ async function postDiscordMessage(env, channelId, content) {
       Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ content }),
+    // allowed_mentions: host names and join codes come from the companion
+    // app, so never let them ping @everyone/@here, roles or users.
+    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -61,24 +72,33 @@ async function postDiscordMessage(env, channelId, content) {
   return res.json();
 }
 
-async function fetchGameStatus(game, env) {
+// A game's own coordinator settings win; otherwise the shared COORDINATOR.
+function coordinatorFor(game) {
+  return {
+    statusUrl: game?.statusUrl || COORDINATOR.statusUrl,
+    statusSecret: game?.statusSecret || COORDINATOR.statusSecret,
+    statusBinding: game?.statusBinding || COORDINATOR.statusBinding,
+  };
+}
+
+async function fetchCoordinatorStatus(coordinator, env) {
   const headers = {
-    "X-Auth": game.statusSecret,
+    "X-Auth": coordinator.statusSecret,
     "User-Agent": "Moonberry-Bot/1.0",
   };
 
   let res;
-  if (game.statusBinding && env[game.statusBinding]) {
+  if (coordinator.statusBinding && env[coordinator.statusBinding]) {
     // Preferred path: direct Worker-to-Worker call via Service Binding,
     // bypassing the public internet entirely (and Cloudflare's 1042
     // loop-prevention block on Worker-to-workers.dev fetches).
-    res = await env[game.statusBinding].fetch(game.statusUrl, { headers });
+    res = await env[coordinator.statusBinding].fetch(coordinator.statusUrl, { headers });
   } else {
     // Fallback for a future game whose coordinator ISN'T a Cloudflare
     // Worker on this account (e.g. hosted elsewhere) -- ordinary public
     // fetch works fine in that case, since the 1042 restriction only
     // applies to Worker-to-Worker calls on workers.dev.
-    res = await fetch(game.statusUrl, { headers });
+    res = await fetch(coordinator.statusUrl, { headers });
   }
 
   if (!res.ok) {
@@ -106,11 +126,6 @@ async function verifyDiscordRequest(request, publicKeyHex, body) {
 // Slash command handling
 // ---------------------------------------------------------------------
 
-const GAME_CHOICES = Object.keys(GAMES).map((key) => ({
-  name: GAMES[key].displayName,
-  value: key,
-}));
-
 const CHANNEL_KV_PREFIX = "channel:";
 
 async function getChannelForGame(env, gameKey, fallbackChannelId) {
@@ -122,30 +137,58 @@ async function setChannelForGame(env, gameKey, channelId) {
   await env.MOONBERRY_KV.put(CHANNEL_KV_PREFIX + gameKey, channelId);
 }
 
+function displayNameFor(gameKey) {
+  return GAMES[gameKey]?.displayName || gameKey;
+}
+
 async function handleStatusCommand(interaction, env) {
   const gameOption = interaction.data.options?.find((o) => o.name === "game");
-  const gameKey = gameOption ? gameOption.value : Object.keys(GAMES)[0];
-  const game = GAMES[gameKey];
+  const gameKey = gameOption ? gameOption.value : null;
+  const game = gameKey ? GAMES[gameKey] : null;
 
-  if (!game) {
+  if (gameKey && !game) {
     return { content: `Unknown game "${gameKey}".` };
   }
 
+  let status;
   try {
-    const status = await fetchGameStatus(game, env);
-    if (status.hosting) {
-      const codePart = status.join_code ? ` | Join Code: **${status.join_code}**` : "";
-      return {
-        content: `${game.emoji} **${game.displayName}**: ${status.host_name} is currently hosting${codePart}`,
-      };
-    } else {
-      return {
-        content: `${game.emoji} **${game.displayName}**: nobody is hosting right now.`,
-      };
-    }
+    status = await fetchCoordinatorStatus(coordinatorFor(game), env);
   } catch (e) {
-    return { content: `⚠️ Couldn't reach the ${game.displayName} coordinator right now.` };
+    const what = game ? `the ${game.displayName} coordinator` : "the coordinator";
+    return { content: `⚠️ Couldn't reach ${what} right now.` };
   }
+
+  // The coordinator keeps the last game_id after a session ends, so
+  // "hosting" alone isn't enough -- it also has to be the game asked about.
+  const hostedKey = status.hosting ? status.game_id : null;
+  const hostingLine = (key) => {
+    const g = GAMES[key];
+    const emoji = g ? `${g.emoji} ` : "";
+    const codePart = status.join_code ? ` | Join Code: **${status.join_code}**` : "";
+    return `${emoji}**${displayNameFor(key)}**: ${status.host_name} is currently hosting${codePart}`;
+  };
+
+  if (!game) {
+    // No game picked: report whatever is being hosted, if anything.
+    return { content: hostedKey ? hostingLine(hostedKey) : "Nobody is hosting anything right now." };
+  }
+
+  if (hostedKey === gameKey) {
+    return { content: hostingLine(gameKey) };
+  }
+
+  if (hostedKey) {
+    // One global host lock: nobody can host this game until that ends.
+    return {
+      content:
+        `${game.emoji} **${game.displayName}**: nobody is hosting right now — ` +
+        `${status.host_name} is hosting ${displayNameFor(hostedKey)}.`,
+    };
+  }
+
+  return {
+    content: `${game.emoji} **${game.displayName}**: nobody is hosting right now.`,
+  };
 }
 
 async function handleSetChannelCommand(interaction, env) {
@@ -167,6 +210,14 @@ async function handleSetChannelCommand(interaction, env) {
   };
 }
 
+// Optional string fields from the companion app: trimmed, length-capped,
+// and null when missing/blank or not a string.
+function cleanField(value, maxLength) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().slice(0, maxLength);
+  return trimmed || null;
+}
+
 // ---------------------------------------------------------------------
 // Shared notify logic (called by both the current /notify and the
 // legacy /notify/<game> routes)
@@ -178,22 +229,31 @@ async function handleNotify(gameKey, body, env) {
     return json({ error: "unknown_game" }, 404);
   }
 
-  const hostName = body.host_name || "Someone";
-  const joinCode = body.join_code || null;
+  const hostName = cleanField(body.host_name, 64) || "Someone";
+  const joinCode = cleanField(body.join_code, 64);
   const event = body.event || "started"; // "started" or "ended"
 
   let message;
   if (event === "ended") {
     message = `${game.emoji} **${hostName}** stopped hosting ${game.displayName}. World save synced to the cloud.`;
   } else {
+    // Password: the host's per-game setting from the app if it sent one,
+    // else this game's recommendedPassword, else no password line at all.
+    const password = cleanField(body.password, 128) || game.recommendedPassword || null;
+
+    // No join code: the game's own fallback line (noCodeText); an empty
+    // string or null leaves the line out.
     const codeLine = joinCode
       ? `Join Code: **${joinCode}**`
-      : `Join via Steam invite (no join code found this session)`;
+      : game.noCodeText === undefined
+        ? "No join code shared yet — ask the host."
+        : game.noCodeText;
 
-    message =
-      `${game.emoji} **${hostName}** just started hosting ${game.displayName}!\n` +
-      `Password: \`${game.recommendedPassword}\`\n` +
-      codeLine;
+    const lines = [`${game.emoji} **${hostName}** just started hosting ${game.displayName}!`];
+    // Backticks would end the inline-code span early, so strip them.
+    if (password) lines.push(`Password: \`${password.replace(/`/g, "")}\``);
+    if (codeLine) lines.push(codeLine);
+    message = lines.join("\n");
   }
 
   try {

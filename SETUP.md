@@ -1,8 +1,9 @@
 # Moonberry Setup
 
-A generic Discord bot for game-hosting notifications. Right now it knows
-about Valheim; adding another game later is just adding one config block
-to `worker.js` — no restructuring needed.
+A generic Discord bot for game-hosting notifications. It knows about
+Valheim, RuneScape: Dragonwilds and Project Zomboid; adding another game
+is one config block in `games.config.js` plus re-registering the slash
+commands — no code changes.
 
 Runs on Cloudflare Workers (same free account/pattern as your existing
 Valheim coordinator) — no new hosting service to sign up for.
@@ -37,20 +38,38 @@ Valheim coordinator) — no new hosting service to sign up for.
 2. Right-click the channel you want Moonberry to post hosting alerts in,
    click **Copy Channel ID**.
 
-## 4. Fill in worker.js
+## 4. Fill in games.config.js
 
-Open `worker.js` and edit the `GAMES` object:
+Copy `games.config.example.js` to `games.config.js` (gitignored — it holds
+your real channel IDs and secrets, never commit it) and fill it in:
 
 ```js
-valheim: {
-  displayName: "Valheim",
-  emoji: "🌙",
-  channelId: "PASTE_YOUR_CHANNEL_ID",
-  recommendedPassword: "PASTE_YOUR_GROUP_PASSWORD",
-  statusUrl: "https://valheim-sync-coordinator.baikings.workers.dev/status",
-  statusSecret: "REPLACE_WITH_YOUR_COORDINATOR_SHARED_SECRET",   // same secret as your existing coordinator
-},
+// The one coordinator every game shares.
+export const COORDINATOR = {
+  statusUrl: "https://moonberry-coordinator.YOUR_SUBDOMAIN.workers.dev/status",
+  statusSecret: "REPLACE_WITH_YOUR_COORDINATOR_SHARED_SECRET", // the coordinator's SHARED_SECRET
+  statusBinding: "COORDINATOR", // matches [[services]] in wrangler.toml
+};
+
+export const GAMES = {
+  valheim: {
+    displayName: "Valheim",
+    emoji: "🌙",
+    channelId: "PASTE_YOUR_CHANNEL_ID",
+    recommendedPassword: "PASTE_YOUR_GROUP_PASSWORD", // optional
+    noCodeText: "Join via Steam invite (no join code found this session)",
+  },
+  // dragonwilds, zomboid: see games.config.example.js
+};
 ```
+
+- The keys (`valheim`, `dragonwilds`, `zomboid`) must match the `game_id`
+  the companion app sends.
+- **Password line:** shown if the app sends a `password` with the
+  notification, else `recommendedPassword`, else left out.
+- **`noCodeText`:** the line shown when there's no join code; `""` leaves
+  it out.
+- `channelId` is the default; `/set-channel` overrides it per game.
 
 ## 5. Install dependencies and deploy
 
@@ -88,48 +107,35 @@ Redeploy once more after setting secrets: `wrangler deploy`.
    green/saves successfully, verification worked. If it fails, double
    check the Worker deployed successfully and the public key is correct.
 
-## 7. Register the `/status` slash command
+## 7. Register the slash commands
 
-This is a one-time REST call (not something `wrangler` does for you).
-Run this once from any terminal with `curl` installed, filling in your
-own Application ID and Bot Token, and your Discord Server (Guild) ID
-(right-click your server icon → Copy Server ID with Developer Mode on):
+`/status` and `/set-channel` are registered with a one-off script (not
+something `wrangler deploy` does). It builds each command's game choices
+from `GAMES`, so **re-run it whenever you add a game**.
 
-```bash
-curl -X POST "https://discord.com/api/v10/applications/YOUR_APPLICATION_ID/guilds/YOUR_SERVER_ID/commands" \
-  -H "Authorization: Bot YOUR_BOT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "status",
-    "description": "Check who is currently hosting",
-    "options": [
-      {
-        "name": "game",
-        "description": "Which game to check",
-        "type": 3,
-        "required": false,
-        "choices": [
-          { "name": "Valheim", "value": "valheim" }
-        ]
-      }
-    ]
-  }'
+You need your Application ID, your Server (Guild) ID (right-click your
+server icon → Copy Server ID, with Developer Mode on) and the bot token.
+In PowerShell:
+
+```powershell
+$env:DISCORD_APPLICATION_ID = "YOUR_APPLICATION_ID"
+$env:DISCORD_GUILD_ID = "YOUR_SERVER_ID"
+$env:DISCORD_BOT_TOKEN = "YOUR_BOT_TOKEN"
+npm run commands:list       # read-only: what's registered right now
+npm run commands:register   # overwrite this server's commands
 ```
 
-Guild-specific commands (using your server ID) show up instantly. Global
-commands (omitting `/guilds/YOUR_SERVER_ID`) can take up to an hour to
-propagate — use guild-specific while testing.
-
-**When you add a new game later:** re-run this same curl command with an
-updated `choices` array including the new game, so `/status` can offer it
-as an option too.
+`register` replaces all of this server's (guild) commands with the ones
+in the script; global commands are left alone. Guild commands show up
+instantly.
 
 ## 8. Test it
 
-In Discord, type `/status` — Moonberry should reply with current Valheim
-hosting status, live from your coordinator.
+In Discord, type `/status` — Moonberry replies with whoever is hosting,
+live from the coordinator. `/status game:Valheim` only reports hosting if
+it's Valheim being hosted.
 
-For the "posts when someone hosts" feature, that's triggered by the
-Valheim companion app itself (see the updated `main.py` — it now calls
-Moonberry's `/notify/valheim` endpoint automatically). Start hosting from
-the companion app and you should see Moonberry post in your channel.
+The "someone started/stopped hosting" posts come from the companion app
+(moonberry-save-sync), which calls `POST /notify` with the `game_id` in
+the body. Start hosting from the app and Moonberry posts in that game's
+channel.
