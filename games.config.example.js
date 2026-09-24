@@ -23,7 +23,7 @@ export const COORDINATOR = {
 export const GAMES = {
   valheim: {
     displayName: "Valheim",
-    emoji: "🌙",
+    emoji: "🪓",
     channelId: "REPLACE_WITH_YOUR_DISCORD_CHANNEL_ID",
     recommendedPassword: "REPLACE_WITH_YOUR_GROUP_PASSWORD",
     noCodeText: "Join via Steam invite (no join code found this session)",
