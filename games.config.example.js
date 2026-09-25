@@ -5,7 +5,7 @@
 // this example file is what's safe to keep in the public/shared repo.
 // -----------------------------------------------------------------------
 
-// The one coordinator every game shares (a single global host lock).
+// The one coordinator every game shares (one host per game at a time).
 // statusBinding must match the [[services]] binding in wrangler.toml.
 export const COORDINATOR = {
   statusUrl: "https://moonberry-coordinator.your-subdomain.workers.dev/status",
@@ -39,5 +39,11 @@ export const GAMES = {
     emoji: "🧟",
     channelId: "REPLACE_WITH_YOUR_DISCORD_CHANNEL_ID",
     noCodeText: "Join via the host's Steam invite.",
+  },
+  vrising: {
+    displayName: "V Rising",
+    emoji: "🧛",
+    channelId: "REPLACE_WITH_YOUR_DISCORD_CHANNEL_ID",
+    noCodeText: "Join via the host's Steam invite or the server list.",
   },
 };

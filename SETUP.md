@@ -1,7 +1,7 @@
 # Moonberry Setup
 
 A generic Discord bot for game-hosting notifications. It knows about
-Valheim, RuneScape: Dragonwilds and Project Zomboid; adding another game
+Valheim, RuneScape: Dragonwilds, Project Zomboid and V Rising; adding another game
 is one config block in `games.config.js` plus re-registering the slash
 commands — no code changes.
 
@@ -59,11 +59,11 @@ export const GAMES = {
     recommendedPassword: "PASTE_YOUR_GROUP_PASSWORD", // optional
     noCodeText: "Join via Steam invite (no join code found this session)",
   },
-  // dragonwilds, zomboid: see games.config.example.js
+  // dragonwilds, zomboid, vrising: see games.config.example.js
 };
 ```
 
-- The keys (`valheim`, `dragonwilds`, `zomboid`) must match the `game_id`
+- The keys (`valheim`, `dragonwilds`, `zomboid`, `vrising`) must match the `game_id`
   the companion app sends.
 - **Password line:** shown if the app sends a `password` with the
   notification, else `recommendedPassword`, else left out.
@@ -131,9 +131,9 @@ instantly.
 
 ## 8. Test it
 
-In Discord, type `/status` — Moonberry replies with whoever is hosting,
-live from the coordinator. `/status game:Valheim` only reports hosting if
-it's Valheim being hosted.
+In Discord, type `/status` — Moonberry replies with everyone who's hosting
+(one host per game can be hosting at once), live from the coordinator.
+`/status game:Valheim` reports just Valheim's host, if any.
 
 The "someone started/stopped hosting" posts come from the companion app
 (moonberry-save-sync), which calls `POST /notify` with the `game_id` in

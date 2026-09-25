@@ -13,7 +13,7 @@
  *      from Discord, then replies with live status pulled directly from
  *      the coordinator.
  *
- * All games share ONE coordinator (a single global host lock), set once
+ * All games share ONE coordinator (one host per game at a time), set once
  * as COORDINATOR in games.config.js. A game entry can still override
  * statusUrl/statusSecret/statusBinding if it ever gets its own.
  *
@@ -158,37 +158,38 @@ async function handleStatusCommand(interaction, env) {
     return { content: `⚠️ Couldn't reach ${what} right now.` };
   }
 
-  // The coordinator keeps the last game_id after a session ends, so
-  // "hosting" alone isn't enough -- it also has to be the game asked about.
-  const hostedKey = status.hosting ? status.game_id : null;
+  const hosts = hostsByGame(status);
   const hostingLine = (key) => {
     const g = GAMES[key];
     const emoji = g ? `${g.emoji} ` : "";
-    const codePart = status.join_code ? ` | Join Code: **${status.join_code}**` : "";
-    return `${emoji}**${displayNameFor(key)}**: ${status.host_name} is currently hosting${codePart}`;
+    const host = hosts[key];
+    const codePart = host.join_code ? ` | Join Code: **${host.join_code}**` : "";
+    return `${emoji}**${displayNameFor(key)}**: ${host.host_name} is currently hosting${codePart}`;
   };
 
   if (!game) {
-    // No game picked: report whatever is being hosted, if anything.
-    return { content: hostedKey ? hostingLine(hostedKey) : "Nobody is hosting anything right now." };
+    // No game picked: every game being hosted right now, if any.
+    const keys = Object.keys(hosts).sort();
+    return { content: keys.length ? keys.map(hostingLine).join("\n") : "Nobody is hosting anything right now." };
   }
 
-  if (hostedKey === gameKey) {
+  if (hosts[gameKey]) {
     return { content: hostingLine(gameKey) };
-  }
-
-  if (hostedKey) {
-    // One global host lock: nobody can host this game until that ends.
-    return {
-      content:
-        `${game.emoji} **${game.displayName}**: nobody is hosting right now — ` +
-        `${status.host_name} is hosting ${displayNameFor(hostedKey)}.`,
-    };
   }
 
   return {
     content: `${game.emoji} **${game.displayName}**: nobody is hosting right now.`,
   };
+}
+
+// { game_id: { host_name, join_code, ... } } for every game being hosted.
+// The coordinator allows one host per game and lists them in `hosts`; an
+// older one only knew one global host, in the top-level fields (and keeps
+// the last game_id after a session ends, so `hosting` has to be checked).
+function hostsByGame(status) {
+  if (status.hosts && typeof status.hosts === "object") return status.hosts;
+  if (!status.hosting) return {};
+  return { [status.game_id || "unknown"]: { host_name: status.host_name, join_code: status.join_code } };
 }
 
 async function handleSetChannelCommand(interaction, env) {
