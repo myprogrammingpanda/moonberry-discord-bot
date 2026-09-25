@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "commands:list": "node scripts/register-commands.mjs list",
-    "commands:register": "node scripts/register-commands.mjs register"
+    "commands:register": "node scripts/register-commands.mjs register",
+    "test": "node scripts/test-announcements.mjs"
   },
   "dependencies": {
     "discord-interactions": "^4.0.0"

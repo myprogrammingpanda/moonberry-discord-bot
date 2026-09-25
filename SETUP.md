@@ -69,6 +69,10 @@ export const GAMES = {
   notification, else `recommendedPassword`, else left out.
 - **`noCodeText`:** the line shown when there's no join code; `""` leaves
   it out.
+- **`joinCodeWaitSeconds`:** for games with join codes, how long the bot's
+  own announcement waits for the code to reach the coordinator before
+  posting without one (Valheim 300, Dragonwilds 660). Leave it out for
+  games without codes — they're announced straight away.
 - `channelId` is the default; `/set-channel` overrides it per game.
 
 ## 5. Install dependencies and deploy
@@ -109,7 +113,7 @@ Redeploy once more after setting secrets: `wrangler deploy`.
 
 ## 7. Register the slash commands
 
-`/status` and `/set-channel` are registered with a one-off script (not
+`/status`, `/set-channel` and `/announcements` are registered with a one-off script (not
 something `wrangler deploy` does). It builds each command's game choices
 from `GAMES`, so **re-run it whenever you add a game**.
 
@@ -135,7 +139,23 @@ In Discord, type `/status` — Moonberry replies with everyone who's hosting
 (one host per game can be hosting at once), live from the coordinator.
 `/status game:Valheim` reports just Valheim's host, if any.
 
-The "someone started/stopped hosting" posts come from the companion app
-(moonberry-save-sync), which calls `POST /notify` with the `game_id` in
-the body. Start hosting from the app and Moonberry posts in that game's
-channel.
+## 9. Hosting announcements
+
+Moonberry checks the coordinator every minute (a Cron Trigger, set in
+`wrangler.toml`) and posts "X just started / stopped hosting" in that
+game's channel by itself — players don't need anything in their app's
+settings. It's **off** until someone with **Manage Server** turns it on:
+
+- `/announcements mode:on` — every game
+- `/announcements mode:off game:Valheim` — just one game (a per-game
+  setting wins over the all-games one; `mode:on`/`off` without a game
+  clears them)
+
+Sessions that were already running when it was turned on aren't
+announced. Games with join codes wait for the code (see
+`joinCodeWaitSeconds`); an announcement can be up to about a minute late.
+
+Older companion apps still post through `POST /notify` themselves (with
+the `game_id` in the body) when the bot URL and secret are filled in.
+While announcements are on for a game, each side skips a session the
+other one already posted.

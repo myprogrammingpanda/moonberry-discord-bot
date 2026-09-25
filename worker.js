@@ -5,10 +5,14 @@
  * more than one game later without restructuring anything.
  *
  * How it works:
- *   1. The companion app (moonberry-save-sync) calls POST /notify with
- *      the game_id in the body whenever someone starts or stops hosting.
- *      This Worker then posts a message to that game's Discord channel.
- *   2. Discord sends slash-command invocations (e.g. /status) to
+ *   1. Every minute a Cron Trigger checks the coordinator's /status and
+ *      posts "X started/stopped hosting" to that game's Discord channel
+ *      (announcements.js), once an admin has turned that on with
+ *      /announcements.
+ *   2. Older companion apps (moonberry-save-sync) still call POST /notify
+ *      themselves with the game_id in the body; those get posted too,
+ *      and each side skips what the other already posted.
+ *   3. Discord sends slash-command invocations (e.g. /status) to
  *      POST /interactions. This Worker verifies the request really came
  *      from Discord, then replies with live status pulled directly from
  *      the coordinator.
@@ -34,6 +38,15 @@ import { verifyKey } from "discord-interactions";
 // Namespace import so an older games.config.js without a COORDINATOR
 // export still builds (it just comes through as undefined).
 import * as config from "./games.config.js";
+import {
+  hostsByGame,
+  startedMessage,
+  stoppedMessage,
+  effectiveSetting,
+  setAnnouncements,
+  noteAppNotify,
+  runAnnouncementTick,
+} from "./announcements.js";
 
 // ---------------------------------------------------------------------
 // Game registry lives in games.config.js (gitignored, not committed).
@@ -54,7 +67,8 @@ function json(data, status = 200) {
 // Discord REST helpers
 // ---------------------------------------------------------------------
 
-async function postDiscordMessage(env, channelId, content) {
+// `message` is a Discord message object ({ content, components, ... }).
+async function postDiscordMessage(env, channelId, message) {
   const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
     method: "POST",
     headers: {
@@ -63,7 +77,7 @@ async function postDiscordMessage(env, channelId, content) {
     },
     // allowed_mentions: host names and join codes come from the companion
     // app, so never let them ping @everyone/@here, roles or users.
-    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+    body: JSON.stringify({ ...message, allowed_mentions: { parse: [] } }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -182,16 +196,6 @@ async function handleStatusCommand(interaction, env) {
   };
 }
 
-// { game_id: { host_name, join_code, ... } } for every game being hosted.
-// The coordinator allows one host per game and lists them in `hosts`; an
-// older one only knew one global host, in the top-level fields (and keeps
-// the last game_id after a session ends, so `hosting` has to be checked).
-function hostsByGame(status) {
-  if (status.hosts && typeof status.hosts === "object") return status.hosts;
-  if (!status.hosting) return {};
-  return { [status.game_id || "unknown"]: { host_name: status.host_name, join_code: status.join_code } };
-}
-
 async function handleSetChannelCommand(interaction, env) {
   const gameOption = interaction.data.options?.find((o) => o.name === "game");
   const gameKey = gameOption ? gameOption.value : Object.keys(GAMES)[0];
@@ -208,6 +212,48 @@ async function handleSetChannelCommand(interaction, env) {
 
   return {
     content: `${game.emoji} Got it — ${game.displayName} hosting notifications will now be posted in this channel.`,
+  };
+}
+
+// Interaction response flag: only the person who ran the command sees it.
+const EPHEMERAL = 1 << 6;
+
+// Discord permission bits (member.permissions is a decimal string).
+const ADMINISTRATOR = 1n << 3n;
+const MANAGE_GUILD = 1n << 5n;
+
+function canManageServer(interaction) {
+  const perms = interaction.member?.permissions;
+  if (!perms) return false; // DMs: no server to manage
+  return (BigInt(perms) & (ADMINISTRATOR | MANAGE_GUILD)) !== 0n;
+}
+
+// /announcements mode:on|off [game] -- whether the cron posts hosting
+// announcements. The command is registered for Manage Server only, but
+// server admins can loosen that under Integrations, so check again here.
+async function handleAnnouncementsCommand(interaction, env) {
+  if (!canManageServer(interaction)) {
+    return { content: "Only people with Manage Server can change announcements.", flags: EPHEMERAL };
+  }
+
+  const option = (name) => interaction.data.options?.find((o) => o.name === name)?.value;
+  const mode = option("mode");
+  const gameKey = option("game") || null;
+  if (mode !== "on" && mode !== "off") {
+    return { content: 'Pick "on" or "off".', flags: EPHEMERAL };
+  }
+  if (gameKey && !GAMES[gameKey]) {
+    return { content: `Unknown game "${gameKey}".`, flags: EPHEMERAL };
+  }
+
+  const settings = await setAnnouncements(env.MOONBERRY_KV, gameKey, mode === "on");
+  const lines = Object.entries(GAMES).map(([key, game]) => {
+    const on = effectiveSetting(settings, key).enabled;
+    return `${game.emoji} ${game.displayName}: **${on ? "on" : "off"}**`;
+  });
+  return {
+    content: `Hosting announcements (sessions already running when turned on aren't announced):\n${lines.join("\n")}`,
+    flags: EPHEMERAL,
   };
 }
 
@@ -234,30 +280,24 @@ async function handleNotify(gameKey, body, env) {
   const joinCode = cleanField(body.join_code, 64);
   const event = body.event || "started"; // "started" or "ended"
 
-  let message;
-  if (event === "ended") {
-    message = `${game.emoji} **${hostName}** stopped hosting ${game.displayName}. World save synced to the cloud.`;
-  } else {
-    // Password: the host's per-game setting from the app if it sent one,
-    // else this game's recommendedPassword, else no password line at all.
-    const password = cleanField(body.password, 128) || game.recommendedPassword || null;
-
-    // No join code: the game's own fallback line (noCodeText); an empty
-    // string or null leaves the line out.
-    const codeLine = joinCode
-      ? `Join Code: **${joinCode}**`
-      : game.noCodeText === undefined
-        ? "No join code shared yet — ask the host."
-        : game.noCodeText;
-
-    const lines = [`${game.emoji} **${hostName}** just started hosting ${game.displayName}!`];
-    // Backticks would end the inline-code span early, so strip them.
-    if (password) lines.push(`Password: \`${password.replace(/`/g, "")}\``);
-    if (codeLine) lines.push(codeLine);
-    message = lines.join("\n");
-  }
+  const message = event === "ended"
+    ? stoppedMessage(game, { hostName })
+    : startedMessage(game, {
+      hostName,
+      joinCode,
+      // The host's per-game setting from the app if it sent one, else this
+      // game's recommendedPassword, else no password line at all.
+      password: cleanField(body.password, 128) || game.recommendedPassword || null,
+    });
 
   try {
+    // While the cron is announcing this game, skip what it already posted
+    // (and let it know this app posted, so it skips it in turn).
+    // A KV hiccup here shouldn't cost the post itself.
+    const { duplicate } = await noteAppNotify(env.MOONBERRY_KV, gameKey, event === "ended" ? "ended" : "started", hostName)
+      .catch(() => ({ duplicate: false }));
+    if (duplicate) return json({ ok: true, skipped: "already_announced" });
+
     const targetChannelId = await getChannelForGame(env, gameKey, game.channelId);
     await postDiscordMessage(env, targetChannelId, message);
     return json({ ok: true });
@@ -300,6 +340,11 @@ export default {
         return json({ type: 4, data: reply });
       }
 
+      if (interaction.type === 2 && interaction.data.name === "announcements") {
+        const reply = await handleAnnouncementsCommand(interaction, env);
+        return json({ type: 4, data: reply });
+      }
+
       return json({ type: 4, data: { content: "Unknown command." } });
     }
 
@@ -335,5 +380,21 @@ export default {
     }
 
     return json({ error: "not_found" }, 404);
+  },
+
+  // Cron Trigger (wrangler.toml [triggers]): coordinator-driven announcements.
+  async scheduled(controller, env) {
+    const result = await runAnnouncementTick({
+      kv: env.MOONBERRY_KV,
+      games: GAMES,
+      // The shared coordinator; a game with its own coordinator would need
+      // its own fetch here.
+      fetchStatus: () => fetchCoordinatorStatus(coordinatorFor(null), env),
+      post: async (gameKey, message) => {
+        const channelId = await getChannelForGame(env, gameKey, GAMES[gameKey].channelId);
+        await postDiscordMessage(env, channelId, message);
+      },
+    });
+    if (result.posted?.length || result.failed?.length) console.log("announcements:", JSON.stringify(result));
   },
 };

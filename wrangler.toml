@@ -22,6 +22,12 @@ kv_namespaces = [
 binding = "COORDINATOR"
 service = "moonberry-coordinator"
 
+# Every minute (the free tier's minimum): check the coordinator and post
+# hosting announcements -- see announcements.js. Posts nothing until an
+# admin runs /announcements on.
+[triggers]
+crons = ["* * * * *"]
+
 # Secrets (set these, don't hardcode them here):
 #   wrangler secret put DISCORD_BOT_TOKEN
 #   wrangler secret put DISCORD_PUBLIC_KEY

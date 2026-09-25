@@ -18,6 +18,10 @@ export const COORDINATOR = {
 //                        with the notification. Leave out for no line.
 //   noCodeText           line shown when there's no join code; "" or
 //                        null leaves it out.
+//   joinCodeWaitSeconds  optional; how long the bot's own announcement
+//                        waits for a join code to show up in the
+//                        coordinator before posting without one. Leave
+//                        out (0) for games without join codes.
 //   statusUrl / statusSecret / statusBinding  optional per-game override
 //                        of COORDINATOR (only if a game gets its own).
 export const GAMES = {
@@ -27,12 +31,14 @@ export const GAMES = {
     channelId: "REPLACE_WITH_YOUR_DISCORD_CHANNEL_ID",
     recommendedPassword: "REPLACE_WITH_YOUR_GROUP_PASSWORD",
     noCodeText: "Join via Steam invite (no join code found this session)",
+    joinCodeWaitSeconds: 300, // scraped from the game's log once the world is up
   },
   dragonwilds: {
     displayName: "RuneScape: Dragonwilds",
     emoji: "🐉",
     channelId: "REPLACE_WITH_YOUR_DISCORD_CHANNEL_ID",
     noCodeText: "No invite code shared yet — ask the host for it.",
+    joinCodeWaitSeconds: 660, // pasted in by the host; the app itself waits 600 s
   },
   zomboid: {
     displayName: "Project Zomboid",

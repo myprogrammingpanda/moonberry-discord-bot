@@ -1,6 +1,7 @@
 // scripts/register-commands.mjs
 // -----------------------------------------------------------------------
-// Registers Moonberry's slash commands (/status, /set-channel) with
+// Registers Moonberry's slash commands (/status, /set-channel,
+// /announcements) with
 // Discord, with the game choices built from GAMES in games.config.js.
 // Re-run after adding a game. Deploying the Worker does NOT do this.
 //
@@ -20,6 +21,8 @@ import { GAMES } from "../games.config.js";
 
 const API = "https://discord.com/api/v10";
 const STRING_OPTION = 3;
+// Permission bitfield (as a string) a member needs to see/use a command.
+const MANAGE_GUILD = String(1 << 5);
 
 const { DISCORD_APPLICATION_ID: appId, DISCORD_GUILD_ID: guildId, DISCORD_BOT_TOKEN: token } = process.env;
 if (!appId || !guildId || !token) {
@@ -52,6 +55,30 @@ const COMMANDS = [
         description: "Which game's notifications to move here",
         type: STRING_OPTION,
         required: true,
+        choices: gameChoices,
+      },
+    ],
+  },
+  {
+    name: "announcements",
+    description: "Turn the bot's own hosting announcements on or off",
+    default_member_permissions: MANAGE_GUILD,
+    options: [
+      {
+        name: "mode",
+        description: "On or off",
+        type: STRING_OPTION,
+        required: true,
+        choices: [
+          { name: "on", value: "on" },
+          { name: "off", value: "off" },
+        ],
+      },
+      {
+        name: "game",
+        description: "Just this game (leave out for every game)",
+        type: STRING_OPTION,
+        required: false,
         choices: gameChoices,
       },
     ],
